@@ -1,10 +1,20 @@
+# Web server
 fastapi
 uvicorn
 python-multipart
+gunicorn
+
+# Image processing
+opencv-python-headless
+Pillow
+
+# Data processing
 numpy
 pandas
-opencv-python-headless
-tensorflow
-keras
+
+# Machine learning
+tensorflow-cpu
 ultralytics
-pillow
+
+# Performance tools
+psutil
