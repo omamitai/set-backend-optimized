@@ -22,14 +22,17 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Set Python to run in optimized mode for production
+# Set environment variables for stability and performance
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONOPTIMIZE=2 \
     PATH="/opt/venv/bin:$PATH" \
     PORT=8080 \
     TF_CPP_MIN_LOG_LEVEL=2 \
-    TF_ENABLE_ONEDNN_OPTS=1
+    TF_ENABLE_ONEDNN_OPTS=1 \
+    PYTHONOPTIMIZE=1 \
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    TENSORRT_LIBRARY_PATH="" \
+    XLA_FLAGS="--xla_gpu_cuda_data_dir=/"
 
 # Install only runtime dependencies for OpenCV (minimal set)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -57,5 +60,5 @@ USER appuser
 # Expose the port
 EXPOSE 8080
 
-# Configure Gunicorn for production (workers based on CPU cores)
-CMD ["sh", "-c", "gunicorn app:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT} --timeout 120"]
+# Start with a direct uvicorn command for more reliability
+CMD ["sh", "-c", "python app.py"]
