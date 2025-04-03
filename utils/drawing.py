@@ -1,4 +1,27 @@
 import cv2
+import numpy as np
+
+# Pre-define colors for better performance and readability
+COLORS = [
+    (255, 0, 0),   # Blue
+    (0, 255, 0),   # Green
+    (0, 0, 255),   # Red
+    (255, 255, 0), # Cyan
+    (255, 0, 255), # Magenta
+    (0, 255, 255)  # Yellow
+]
+
+def parse_coordinates(coord_str):
+    """
+    Parse coordinate string to integer values.
+    
+    Args:
+        coord_str (str): Comma-separated coordinate string "x1, y1, x2, y2"
+    
+    Returns:
+        tuple: (x1, y1, x2, y2) as integers
+    """
+    return tuple(map(int, coord_str.split(',')))
 
 def draw_sets_on_image(board_image, sets_info):
     """
@@ -11,44 +34,29 @@ def draw_sets_on_image(board_image, sets_info):
     Returns:
         numpy.ndarray: The annotated board image.
     """
-    # Make a copy to avoid modifying the original image
-    result_image = board_image.copy()
-    
-    # Get image dimensions once for bounds checking
-    img_height, img_width = result_image.shape[:2]
-    
-    # Predefined colors for better visibility (BGR format)
-    # Using a tuple for faster access compared to a list
-    colors = (
-        (255, 0, 0),    # Blue
-        (0, 255, 0),    # Green
-        (0, 0, 255),    # Red
-        (255, 255, 0),  # Cyan
-        (255, 0, 255),  # Magenta
-        (0, 255, 255)   # Yellow
-    )
+    # Get image dimensions once - avoid repeated property access
+    img_height, img_width = board_image.shape[:2]
     
     # Base parameters
     base_thickness = 8
     base_expansion = 5
-    color_count = len(colors)
+    
+    # Create a copy of the image to avoid modifying the original
+    result_image = board_image.copy()
     
     # Process each set
     for index, set_info in enumerate(sets_info):
-        # Select color and parameters for this set
-        color = colors[index % color_count]
+        # Calculate parameters for this set
+        color = COLORS[index % len(COLORS)]
         thickness = base_thickness + 2 * index
         expansion = base_expansion + 15 * index
         
         # Process each card in the set
         for i, card in enumerate(set_info['cards']):
-            # Parse coordinates efficiently
+            # Parse coordinates once - optimization to avoid repeated parsing
             if isinstance(card['Coordinates'], str):
-                # Split once and convert all at once
-                coords = card['Coordinates'].split(',')
-                x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+                x1, y1, x2, y2 = parse_coordinates(card['Coordinates'])
             else:
-                # Handle case where coordinates might already be numeric
                 x1, y1, x2, y2 = card['Coordinates']
             
             # Calculate expanded box with bounds checking
@@ -57,23 +65,23 @@ def draw_sets_on_image(board_image, sets_info):
             x2_expanded = min(img_width, x2 + expansion)
             y2_expanded = min(img_height, y2 + expansion)
             
-            # Draw the rectangle in one call
+            # Draw bounding box
             cv2.rectangle(
-                result_image,
-                (x1_expanded, y1_expanded),
-                (x2_expanded, y2_expanded),
-                color,
+                result_image, 
+                (x1_expanded, y1_expanded), 
+                (x2_expanded, y2_expanded), 
+                color, 
                 thickness
             )
             
-            # Add label to first card of each set
+            # Only draw label for the first card in each set
             if i == 0:
-                # Position text above the box with safe margin
-                text_y = max(30, y1_expanded - 10)
+                # Position label above the box
+                label_position = (x1_expanded, max(0, y1_expanded - 10))
                 cv2.putText(
                     result_image,
                     f"Set {index + 1}",
-                    (x1_expanded, text_y),
+                    label_position,
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.9,
                     color,
