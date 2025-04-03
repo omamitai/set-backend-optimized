@@ -45,25 +45,26 @@ def draw_sets_on_image(board_image, sets_info):
     
     # Scale parameters based on image size
     base_thickness = max(1, int(img_diagonal * 0.004))  # 0.4% of diagonal
-    base_expansion = max(2, int(img_diagonal * 0.005))  # 0.5% of diagonal
+    base_expansion = max(5, int(img_diagonal * 0.008))  # 0.8% of diagonal
     font_scale = max(0.5, img_diagonal * 0.0007)        # 0.07% of diagonal
     
     # Create a copy of the image to avoid modifying the original
     result_image = board_image.copy()
     
-    # Track card appearance count to apply the exact specified expansion
-    # We'll use defaultdict to avoid explicit initialization
-    card_appearance_count = defaultdict(int)
+    # Create a mapping of which cards appear in which sets
+    # Format: {card_key: [set_indices]}
+    card_set_membership = defaultdict(list)
     
-    # First pass: Count card appearances across all sets before drawing anything
-    for set_info in sets_info:
+    # First pass: Record which sets each card belongs to
+    for set_idx, set_info in enumerate(sets_info):
         for card in set_info['cards']:
             coord_key = card['Coordinates'] if not isinstance(card['Coordinates'], str) else card['Coordinates']
-            card_appearance_count[coord_key] += 1
+            card_set_membership[coord_key].append(set_idx)
     
-    # Process each set using vectorized operations where possible
-    for index, set_info in enumerate(sets_info):
-        color = COLORS[index % len(COLORS)]
+    # Draw all sets in reverse order (so earlier sets appear on top)
+    # This ensures all bounding boxes are visible
+    for set_idx, set_info in enumerate(sets_info):
+        color = COLORS[set_idx % len(COLORS)]
         thickness = base_thickness
         
         # Process each card in the set
@@ -76,26 +77,42 @@ def draw_sets_on_image(board_image, sets_info):
                 x1, y1, x2, y2 = card['Coordinates']
                 coord_str = f"{x1}, {y1}, {x2}, {y2}"
             
-            # Calculate expansion based on how many sets this card belongs to
-            appearances = card_appearance_count[coord_str]
+            # Get all sets this card belongs to
+            card_sets = card_set_membership[coord_str]
             
-            # Precisely targeted expansion based on requirement:
-            # - 0 expansion for cards in exactly 1 set
-            # - 1 unit for cards in exactly 2 sets
-            # - 2 units for cards in exactly 3 sets
-            expansion = 0
-            if appearances == 2:
-                expansion = base_expansion
-            elif appearances >= 3:
-                expansion = 2 * base_expansion
+            # Calculate which number appearance this is for this card
+            appearance_idx = card_sets.index(set_idx)
+            total_appearances = len(card_sets)
             
+            # Calculate appropriate expansion based on total appearances
+            # - First appearance (lowest set index): No expansion
+            # - Second appearance: 1 base expansion
+            # - Third or more: 2 base expansions
+            expansions = []
+            
+            # Add all required expansions
+            if total_appearances == 1:
+                # Only one appearance - no expansion
+                expansions.append(0)
+            elif total_appearances == 2:
+                # Two appearances - 0 for first, 1 for second
+                expansions.extend([0, base_expansion])
+            else:
+                # Three or more - 0 for first, 1 for second, 2 for third+
+                expansions.extend([0, base_expansion, 2 * base_expansion])
+                expansions.extend([2 * base_expansion] * (total_appearances - 3))
+            
+            # Always draw the bounding box for the current set index
+            # Calculate this card's expansion based on which set it belongs to first
+            expansion = expansions[appearance_idx]
+                
             # Calculate expanded box with bounds checking
             x1_expanded = max(0, x1 - expansion)
             y1_expanded = max(0, y1 - expansion)
             x2_expanded = min(img_width, x2 + expansion)
             y2_expanded = min(img_height, y2 + expansion)
             
-            # Draw bounding box
+            # Draw bounding box with consistent thickness
             cv2.rectangle(
                 result_image, 
                 (x1_expanded, y1_expanded), 
@@ -107,12 +124,13 @@ def draw_sets_on_image(board_image, sets_info):
             # Only draw label for the first card in each set
             if i == 0:
                 # Scale text margin proportionally to image size
-                text_margin = max(5, int(img_diagonal * 0.005))
+                text_margin = max(5, int(img_diagonal * 0.008))
                 text_y = max(text_margin, y1_expanded - text_margin)
                 
+                # Draw the set number label
                 cv2.putText(
                     result_image,
-                    f"Set {index + 1}",
+                    f"Set {set_idx + 1}",
                     (x1_expanded, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale,
