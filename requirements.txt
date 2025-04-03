@@ -13,8 +13,8 @@ numpy==1.24.3
 pandas==2.0.3
 
 # Machine learning
-tensorflow==2.13.0
-keras==2.13.1
+tensorflow
+keras
 ultralytics==8.0.145
 
 # Performance tools
