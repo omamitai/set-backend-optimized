@@ -8,24 +8,51 @@ import gc
 import traceback
 import time
 import logging
+import sys
 from contextlib import asynccontextmanager
-from tensorflow.keras.models import load_model
-from ultralytics import YOLO
-
-# Import utility functions from optimized modules
-from utils import (
-    check_and_rotate_input_image,
-    classify_cards_from_board_image,
-    find_sets,
-    draw_sets_on_image
-)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+# Configure TensorFlow for CPU optimizations (before importing TensorFlow)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TensorFlow logging
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "1"
+
+# Import TensorFlow in a try-except block to handle import errors gracefully
+try:
+    import tensorflow as tf
+    # Configure TensorFlow for CPU-only operation
+    tf.config.set_visible_devices([], 'GPU')
+    from tensorflow.keras.models import load_model
+    logger.info(f"TensorFlow version: {tf.__version__}")
+except ImportError as e:
+    logger.error(f"Failed to import TensorFlow: {str(e)}")
+    raise
+
+try:
+    from ultralytics import YOLO
+except ImportError as e:
+    logger.error(f"Failed to import YOLO: {str(e)}")
+    raise
+
+# Import utility functions
+try:
+    # Import with proper error handling
+    from utils import (
+        check_and_rotate_input_image,
+        classify_cards_from_board_image,
+        find_sets,
+        draw_sets_on_image
+    )
+except ImportError as e:
+    logger.error(f"Failed to import utils: {str(e)}")
+    raise
 
 # Application state management
 class ModelManager:
@@ -45,26 +72,26 @@ class ModelManager:
         logger.info("Loading models...")
         
         try:
-            # Configure TensorFlow for CPU optimizations (optional, if not set in environment)
-            os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF logging
-            os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "1")  # Enable Intel MKL-DNN
-            
             # Load classification models
+            logger.info("Loading shape model...")
             self.shape_model = load_model('./models/Characteristics/11022025/shape_model.keras', compile=False)
+            
+            logger.info("Loading fill model...")
             self.fill_model = load_model('./models/Characteristics/11022025/fill_model.keras', compile=False)
             
             # Load YOLO detection models - configure for CPU performance
+            logger.info("Loading shape detection model...")
             self.shape_detection_model = YOLO('./models/Shape/15052024/best.pt')
             self.shape_detection_model.yaml = './models/Shape/15052024/data.yaml'
             self.shape_detection_model.conf = 0.5
-            self.shape_detection_model.fuse()  # Fuse model layers for better inference speed
             
+            logger.info("Loading card detection model...")
             self.card_detection_model = YOLO('./models/Card/16042024/best.pt')
             self.card_detection_model.yaml = './models/Card/16042024/data.yaml'
             self.card_detection_model.conf = 0.5
-            self.card_detection_model.fuse()  # Fuse model layers for better inference speed
             
             # Run model warmup for faster first inference
+            logger.info("Warming up models...")
             dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
             self.card_detection_model(dummy_img)
             self.shape_detection_model(dummy_img)
@@ -74,6 +101,7 @@ class ModelManager:
             logger.info(f"Models loaded successfully in {elapsed:.2f} seconds")
         except Exception as e:
             logger.error(f"Error loading models: {str(e)}")
+            logger.error(traceback.format_exc())
             raise
 
     def get_models(self):
@@ -98,9 +126,16 @@ model_manager = ModelManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Load models
-    model_manager.load_models()
+    try:
+        logger.info("Starting application, loading models...")
+        model_manager.load_models()
+        logger.info("Application startup complete.")
+    except Exception as e:
+        logger.error(f"Failed to start application: {str(e)}")
+        logger.error(traceback.format_exc())
     yield
     # Shutdown: nothing specific needed
+    logger.info("Shutting down application...")
 
 # Create FastAPI app
 app = FastAPI(
@@ -130,6 +165,7 @@ async def health_check():
     try:
         # Check if models are loaded
         if not model_manager.is_loaded:
+            logger.info("Health check: models not loaded, loading now...")
             model_manager.load_models()
             
         return {
@@ -248,7 +284,6 @@ if __name__ == "__main__":
         "app:app", 
         host="0.0.0.0", 
         port=port,
-        workers=2,  # Use 2 workers for better CPU utilization without overload
-        log_level="info",
-        timeout_keep_alive=120
+        workers=1,  # Reduced to 1 worker to avoid memory issues
+        log_level="info"
     )
