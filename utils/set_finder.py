@@ -1,5 +1,8 @@
 from itertools import combinations
 
+# Define constants for feature names to avoid string literals
+FEATURES = ['Count', 'Color', 'Fill', 'Shape']
+
 def is_set(cards):
     """
     Determine if a group of cards forms a valid set.
@@ -11,16 +14,21 @@ def is_set(cards):
     Returns:
         bool: True if the cards form a valid set, False otherwise.
     """
-    # Check all features in one pass for efficiency
-    for feature in ('Count', 'Color', 'Fill', 'Shape'):
-        # Use a set for O(1) lookups and unique value counting
-        # This is faster than using list.count() for each value
+    # Fast-path: Verify we have exactly 3 cards (a Set requires 3 cards)
+    if len(cards) != 3:
+        return False
+        
+    # Check each feature efficiently
+    for feature in FEATURES:
+        # Use a set for O(1) lookups and size calculation
         unique_values = {card[feature] for card in cards}
         
-        # For a valid set: must have either 1 unique value (all same) or 3 unique values (all different)
-        if len(unique_values) not in (1, 3):
+        # A valid set must have either all same (1) or all different (3) values
+        # Any other count means it's not a set
+        if len(unique_values) == 2:  # The only invalid case for 3 cards
             return False
-    
+            
+    # If we got here, all features passed the test
     return True
 
 def find_sets(card_df):
@@ -33,39 +41,71 @@ def find_sets(card_df):
     Returns:
         list: List of dictionaries with set details.
     """
-    # Early return if there are fewer than 3 cards (not enough to form a set)
+    # Skip processing if fewer than 3 cards
     if len(card_df) < 3:
         return []
-    
-    # Convert DataFrame to list of dictionaries for faster access
-    # This avoids slow DataFrame indexing operations in the loop
-    cards_list = card_df.to_dict('records')
+        
+    # Convert DataFrame to list of records for faster access
+    # This avoids repeated DataFrame lookups which can be slow
+    cards = card_df.to_dict('records')
     
     # Pre-allocate result list
     sets_found = []
     
-    # Define features to extract once to avoid repeated string creation
-    features_to_extract = ('Count', 'Color', 'Fill', 'Shape', 'Coordinates')
-    
-    # Iterate through all possible combinations of 3 cards
-    # Using index combinations is faster than using DataFrame.iterrows()
-    for idx_combo in combinations(range(len(cards_list)), 3):
-        # Extract the three cards for this combination
-        combo_cards = [cards_list[idx] for idx in idx_combo]
+    # Use combinations to generate all possible triplets
+    # This is more readable and often faster than nested loops
+    for i, (idx1, idx2, idx3) in enumerate(combinations(range(len(cards)), 3)):
+        card_combo = [cards[idx1], cards[idx2], cards[idx3]]
         
-        # Check if these cards form a valid set
-        if is_set(combo_cards):
-            # Create set info with minimal dictionary creation
-            cards_data = []
-            for card in combo_cards:
-                # Extract just the needed features for each card
-                card_data = {feature: card[feature] for feature in features_to_extract}
-                cards_data.append(card_data)
-            
-            set_info = {
-                'set_indices': idx_combo,
-                'cards': cards_data
-            }
-            sets_found.append(set_info)
+        # Check if this combo forms a set
+        if is_set(card_combo):
+            # Store set information
+            sets_found.append({
+                'set_indices': [idx1, idx2, idx3],
+                'cards': card_combo
+            })
     
     return sets_found
+
+def organize_sets_by_overlap(sets_found):
+    """
+    Organize found sets by minimizing overlap between consecutive sets.
+    This helps with visualization by grouping distinct sets together.
+    
+    Args:
+        sets_found (list): List of found sets as returned by find_sets().
+        
+    Returns:
+        list: Reorganized list of sets to minimize card overlap between consecutive sets.
+    """
+    if not sets_found:
+        return []
+        
+    # Already organized if only one set
+    if len(sets_found) <= 1:
+        return sets_found
+        
+    # Start with the first set
+    organized = [sets_found[0]]
+    remaining = sets_found[1:]
+    
+    while remaining:
+        # Get the indices of cards in the most recently added set
+        last_set_indices = set(organized[-1]['set_indices'])
+        
+        # Find the set with minimal overlap with the last set
+        best_overlap = float('inf')
+        best_idx = 0
+        
+        for i, candidate in enumerate(remaining):
+            candidate_indices = set(candidate['set_indices'])
+            overlap = len(last_set_indices.intersection(candidate_indices))
+            
+            if overlap < best_overlap:
+                best_overlap = overlap
+                best_idx = i
+        
+        # Add the best set to our organized list
+        organized.append(remaining.pop(best_idx))
+    
+    return organized
