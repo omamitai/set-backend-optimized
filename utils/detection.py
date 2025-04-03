@@ -1,120 +1,93 @@
 import numpy as np
 import cv2
-from typing import Tuple, List, Any
-import logging
 
-logger = logging.getLogger(__name__)
-
-def check_and_rotate_input_image(board_image: np.ndarray, card_detection_model: Any) -> Tuple[np.ndarray, bool]:
+def check_and_rotate_input_image(board_image, card_detection_model):
     """
-    Efficiently checks the orientation of the board image and rotates if necessary.
-    
-    Optimized with:
-    1. Fast dimension-based heuristic as first check
-    2. Optimized model inference with confidence thresholds
-    3. Card aspect ratio analysis
-    
+    Checks the orientation of the board image by detecting card bounding boxes.
+    If the average detected card height is greater than the average card width,
+    rotates the board image 90° clockwise.
+
     Args:
-        board_image (numpy.ndarray): The original board image (BGR format)
-        card_detection_model: YOLO model for card detection
-        
+        board_image (numpy.ndarray): The original board image (BGR format).
+        card_detection_model: YOLO model for card detection.
+
     Returns:
         tuple: (rotated_image, was_rotated) where rotated_image is either the original
-               image or rotated 90° clockwise, and was_rotated is a boolean flag
+               image or rotated 90° clockwise, and was_rotated is a boolean flag.
     """
-    h, w = board_image.shape[:2]
+    # Run card detection on the board image
+    card_results = card_detection_model(board_image)
     
-    # Fast path: Use image dimensions as initial heuristic
-    # Most Set game photos are in landscape orientation
-    if h > w * 1.2:  # Image is clearly in portrait orientation
-        logger.debug("Image appears to be in portrait orientation based on dimensions")
-        rotated_image = cv2.rotate(board_image, cv2.ROTATE_90_CLOCKWISE)
-        return rotated_image, True
-    
-    # Second check: Use card detection and aspect ratios
-    # Standard playing cards have width/height ratio of ~0.7
-    card_results = card_detection_model(board_image, conf=0.4)  # Lower confidence to detect more cards
+    # Handle empty results case
+    if len(card_results) == 0 or len(card_results[0].boxes) == 0:
+        return board_image, False
+        
+    # Extract bounding boxes
     card_boxes = card_results[0].boxes.xyxy.cpu().numpy().astype(int)
-    
-    # If no cards detected, keep original orientation
+
+    # If no cards are detected, return the original image
     if len(card_boxes) == 0:
         return board_image, False
+
+    # Use vectorized operations for better performance
+    # Calculate width and height of all boxes in one operation
+    widths = card_boxes[:, 2] - card_boxes[:, 0]
+    heights = card_boxes[:, 3] - card_boxes[:, 1]
     
-    # Calculate average aspect ratio of detected cards
-    aspect_ratios = []
-    for box in card_boxes:
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-        if width > 0 and height > 0:  # Avoid division by zero
-            aspect_ratios.append(width / height)
-    
-    # If mean aspect ratio < 0.8, cards are likely in portrait orientation
-    if aspect_ratios and np.mean(aspect_ratios) < 0.8:
-        logger.debug(f"Rotating image based on card aspect ratios (mean: {np.mean(aspect_ratios):.2f})")
+    # Calculate averages with numpy for better efficiency
+    avg_width = np.mean(widths)
+    avg_height = np.mean(heights)
+
+    # If cards are generally vertical (taller than wide), rotate the image
+    if avg_height > avg_width:
+        # Perform the rotation
         rotated_image = cv2.rotate(board_image, cv2.ROTATE_90_CLOCKWISE)
         return rotated_image, True
-    
-    return board_image, False
+    else:
+        # Return original image if no rotation needed
+        return board_image, False
 
-def detect_cards_from_image(board_image: np.ndarray, card_detection_model: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+def detect_cards_from_image(board_image, card_detection_model):
     """
-    Efficiently detect card regions on the board image using the YOLO model.
-    
-    Optimizations:
-    1. Uses optimized confidence thresholds
-    2. Sorts detections by area to prioritize clearer cards
-    3. Adds minimal padding to ensure complete card capture
-    
+    Detect card regions on the board image using the YOLO card detection model.
+
     Args:
-        board_image (numpy.ndarray): The (corrected) board image
-        card_detection_model: YOLO model for card detection
-        
+        board_image (numpy.ndarray): The (corrected) board image.
+        card_detection_model: YOLO model for card detection.
+
     Returns:
-        list: List of tuples containing (card_image, bounding_box)
+        list: List of tuples containing (card_image, bounding_box).
     """
-    # Run detection with optimized parameters for CPU
-    card_results = card_detection_model(
-        board_image,
-        conf=0.5,  # Balanced confidence for precision/recall
-        iou=0.45   # Slightly higher IoU for better NMS
-    )
+    # Get image dimensions once
+    img_height, img_width = board_image.shape[:2]
     
-    # Extract and sort bounding boxes by area (largest first)
+    # Run the card detection model
+    card_results = card_detection_model(board_image)
+    
+    # Handle empty results
+    if len(card_results) == 0 or len(card_results[0].boxes) == 0:
+        return []
+        
+    # Extract boxes from results
     card_boxes = card_results[0].boxes.xyxy.cpu().numpy().astype(int)
     
-    # If too many cards detected (likely false positives), keep only top confidence ones
-    if len(card_boxes) > 15:  # Set games typically have at most 12-15 cards
-        confidences = card_results[0].boxes.conf.cpu().numpy()
-        # Get indices sorted by confidence (highest first)
-        sorted_indices = np.argsort(confidences)[::-1][:15]
-        card_boxes = card_boxes[sorted_indices]
-    
-    # Sort boxes by area (largest first) for better feature detection
-    areas = [(box[2] - box[0]) * (box[3] - box[1]) for box in card_boxes]
-    sorted_indices = np.argsort(areas)[::-1]
-    card_boxes = card_boxes[sorted_indices]
-    
-    # Process each card
+    # Pre-allocate list with estimated capacity for better memory efficiency
     cards = []
-    h, w = board_image.shape[:2]
     
+    # Extract each card image based on its bounding box
     for box in card_boxes:
         x1, y1, x2, y2 = box
         
-        # Add small padding (5px) to ensure whole card is captured
-        x1 = max(0, x1 - 5)
-        y1 = max(0, y1 - 5)
-        x2 = min(w, x2 + 5)
-        y2 = min(h, y2 + 5)
+        # Ensure bounds are within image dimensions
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(img_width, x2), min(img_height, y2)
         
-        # Only process reasonable sized cards (filter out tiny detections)
-        card_width, card_height = x2 - x1, y2 - y1
-        if card_width < 20 or card_height < 20:
+        # Skip invalid boxes
+        if x2 <= x1 or y2 <= y1:
             continue
             
-        # Use copy() to ensure we have a contiguous array for better memory access
-        card_img = board_image[y1:y2, x1:x2].copy()
+        # Extract the card image - use direct slicing for efficiency
+        card_img = board_image[y1:y2, x1:x2]
         cards.append((card_img, box))
     
     return cards
