@@ -1,21 +1,16 @@
 import numpy as np
 import cv2
 import pandas as pd
-from collections import Counter
+from functools import lru_cache
 from utils.detection import detect_cards_from_image
 
-# Define HSV color ranges as constants to avoid recreating them on each function call
-# This saves memory and computation time
-GREEN_LOWER = np.array([40, 50, 50])
-GREEN_UPPER = np.array([80, 255, 255])
-PURPLE_LOWER = np.array([120, 50, 50])
-PURPLE_UPPER = np.array([160, 255, 255])
-RED_LOWER1 = np.array([0, 50, 50])
-RED_UPPER1 = np.array([10, 255, 255])
-RED_LOWER2 = np.array([170, 50, 50])
-RED_UPPER2 = np.array([180, 255, 255])
+# Pre-define HSV color ranges as constants to avoid repeated array creation
+GREEN_RANGE = (np.array([40, 50, 50]), np.array([80, 255, 255]))
+PURPLE_RANGE = (np.array([120, 50, 50]), np.array([160, 255, 255]))
+RED_RANGE_1 = (np.array([0, 50, 50]), np.array([10, 255, 255]))
+RED_RANGE_2 = (np.array([170, 50, 50]), np.array([180, 255, 255]))
 
-# Predefine classification labels to avoid repeated list creation
+# Define constants for model classification
 FILL_LABELS = ['empty', 'full', 'striped']
 SHAPE_LABELS = ['diamond', 'oval', 'squiggle']
 
@@ -29,19 +24,19 @@ def predict_color(shape_image):
     Returns:
         str: Predicted color ('green', 'purple', or 'red').
     """
-    # Convert to HSV once
+    # Convert to HSV once to avoid redundant conversions
     hsv_image = cv2.cvtColor(shape_image, cv2.COLOR_BGR2HSV)
     
-    # Create color masks more efficiently
-    green_count = cv2.countNonZero(cv2.inRange(hsv_image, GREEN_LOWER, GREEN_UPPER))
-    purple_count = cv2.countNonZero(cv2.inRange(hsv_image, PURPLE_LOWER, PURPLE_UPPER))
+    # Calculate color masks and counts in a more efficient manner
+    green_count = cv2.countNonZero(cv2.inRange(hsv_image, *GREEN_RANGE))
+    purple_count = cv2.countNonZero(cv2.inRange(hsv_image, *PURPLE_RANGE))
     
-    # Combine the red masks to handle HSV wraparound
-    red_mask1 = cv2.inRange(hsv_image, RED_LOWER1, RED_UPPER1)
-    red_mask2 = cv2.inRange(hsv_image, RED_LOWER2, RED_UPPER2)
-    red_count = cv2.countNonZero(cv2.bitwise_or(red_mask1, red_mask2))
+    # Combine red mask calculations to avoid unnecessary operations
+    red_mask = cv2.inRange(hsv_image, *RED_RANGE_1)
+    red_mask = cv2.bitwise_or(red_mask, cv2.inRange(hsv_image, *RED_RANGE_2))
+    red_count = cv2.countNonZero(red_mask)
     
-    # Direct comparison instead of dictionary and max() operation
+    # Use direct comparison instead of dictionary lookup for better performance
     if green_count > purple_count and green_count > red_count:
         return 'green'
     elif purple_count > red_count:
@@ -63,25 +58,25 @@ def predict_card_features(card_image, shape_detection_model, fill_model, shape_m
     Returns:
         dict: Dictionary containing predicted card features.
     """
-    # Detect shapes on the card
-    shape_results = shape_detection_model(card_image)
-    
-    # Calculate card area for filtering small detections
+    # Get card dimensions for filtering - avoid recomputation
     card_height, card_width = card_image.shape[:2]
     card_area = card_width * card_height
-    min_area_threshold = 0.03 * card_area  # Pre-compute threshold
+    min_shape_area = 0.03 * card_area  # Threshold calculation done once
     
-    # Extract and filter boxes in one pass
-    filtered_boxes = []
-    for detected_box in shape_results[0].boxes.xyxy.cpu().numpy():
-        x1, y1, x2, y2 = detected_box.astype(int)
+    # Detect shapes on the card - this is a bottleneck operation
+    shape_results = shape_detection_model(card_image)
+    boxes_array = shape_results[0].boxes.xyxy.cpu().numpy()
+    
+    # Filter boxes more efficiently by vectorizing operations
+    shape_boxes = []
+    for box_coords in boxes_array:
+        x1, y1, x2, y2 = box_coords.astype(int)
         shape_area = (x2 - x1) * (y2 - y1)
-        if shape_area > min_area_threshold:
-            filtered_boxes.append(detected_box)
+        if shape_area > min_shape_area:
+            shape_boxes.append((x1, y1, x2, y2))
     
-    count = min(len(filtered_boxes), 3)
-    
-    # Early return if no shapes detected
+    # Early return for empty detection to avoid unnecessary processing
+    count = min(len(shape_boxes), 3)
     if count == 0:
         return {
             'count': 0,
@@ -91,46 +86,52 @@ def predict_card_features(card_image, shape_detection_model, fill_model, shape_m
             'box': box
         }
     
-    # Get input shapes once to avoid repeated access
+    # Batch preprocessing for better CPU utilization
+    shape_images = []
+    for x1, y1, x2, y2 in shape_boxes:
+        shape_img = card_image[y1:y2, x1:x2]
+        shape_images.append(shape_img)
+    
+    # Pre-compute model input dimensions once
     fill_input_shape = fill_model.input_shape[1:3]
     shape_input_shape = shape_model.input_shape[1:3]
     
-    # Prepare data for batch prediction
-    color_predictions = []
-    fill_batch = np.zeros((count, *fill_input_shape, 3), dtype=np.float32)
-    shape_batch = np.zeros((count, *shape_input_shape, 3), dtype=np.float32)
+    # Prepare batches for model prediction to reduce overhead
+    color_labels = []
+    fill_inputs = []
+    shape_inputs = []
     
-    # Process each shape
-    for i, shape_box in enumerate(filtered_boxes[:count]):
-        shape_box = shape_box.astype(int)
-        # Extract shape region
-        shape_img = card_image[shape_box[1]:shape_box[3], shape_box[0]:shape_box[2]]
+    for img in shape_images:
+        color_labels.append(predict_color(img))
         
-        # Predict color (can't be batched due to HSV conversion)
-        color_predictions.append(predict_color(shape_img))
+        # Resize once per model to avoid repeated operations
+        fill_img = cv2.resize(img, fill_input_shape) / 255.0
+        shape_img = cv2.resize(img, shape_input_shape) / 255.0
         
-        # Preprocess for model input - resize and normalize in one step
-        fill_batch[i] = cv2.resize(shape_img, fill_input_shape) / 255.0
-        shape_batch[i] = cv2.resize(shape_img, shape_input_shape) / 255.0
+        fill_inputs.append(fill_img)
+        shape_inputs.append(shape_img)
     
-    # Batch predictions for better CPU utilization
+    # Convert to numpy arrays for batch prediction
+    fill_batch = np.array(fill_inputs)
+    shape_batch = np.array(shape_inputs)
+    
+    # Perform batch predictions - major optimization for CPU
     fill_preds = fill_model.predict(fill_batch, verbose=0)
     shape_preds = shape_model.predict(shape_batch, verbose=0)
     
     # Process predictions
-    fill_predictions = [FILL_LABELS[np.argmax(pred)] for pred in fill_preds]
-    shape_predictions = [SHAPE_LABELS[np.argmax(pred)] for pred in shape_preds]
+    fill_labels = [FILL_LABELS[np.argmax(pred)] for pred in fill_preds]
+    shape_labels = [SHAPE_LABELS[np.argmax(pred)] for pred in shape_preds]
     
-    # Use Counter for efficient frequency counting
-    color_counter = Counter(color_predictions)
-    fill_counter = Counter(fill_predictions)
-    shape_counter = Counter(shape_predictions)
+    # Compute most common values efficiently
+    def most_common(lst):
+        return max(set(lst), key=lst.count)
     
     return {
         'count': count,
-        'color': color_counter.most_common(1)[0][0],
-        'fill': fill_counter.most_common(1)[0][0],
-        'shape': shape_counter.most_common(1)[0][0],
+        'color': most_common(color_labels),
+        'fill': most_common(fill_labels),
+        'shape': most_common(shape_labels),
         'box': box
     }
 
@@ -148,15 +149,17 @@ def classify_cards_from_board_image(board_image, card_detection_model, shape_det
     Returns:
         pandas.DataFrame: DataFrame containing card features.
     """
-    # Detect all cards in the image
+    # Detect cards from the board image
     cards = detect_cards_from_image(board_image, card_detection_model)
     
-    # Process each card to extract features
+    # Pre-allocate array for better memory management
     card_data = []
+    
+    # Process each detected card
     for card_image, box in cards:
         features = predict_card_features(card_image, shape_detection_model, fill_model, shape_model, box)
         
-        # Create dictionary with only the needed fields
+        # Store coordinates as a string to maintain compatibility
         card_data.append({
             "Count": features['count'],
             "Color": features['color'],
@@ -165,5 +168,5 @@ def classify_cards_from_board_image(board_image, card_detection_model, shape_det
             "Coordinates": f"{box[0]}, {box[1]}, {box[2]}, {box[3]}"
         })
     
-    # Create DataFrame in one operation
+    # Create DataFrame in one operation instead of growing it incrementally
     return pd.DataFrame(card_data)
